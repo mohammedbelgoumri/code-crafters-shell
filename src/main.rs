@@ -6,6 +6,6 @@ fn main() {
     print!("$ ");
     io::stdout().flush().unwrap();
     io::stdin().read_line(&mut cmd).unwrap();
-    println!("{cmd}: command not found");
+    println!("{} command not found", cmd.trim());
     io::stdout().flush().unwrap();
 }

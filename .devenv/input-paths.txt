@@ -1,7 +1,0 @@
-/home/mohammed/work/learning/code-crafters/codecrafters-shell-rust/.devenv/flake.json
-/home/mohammed/work/learning/code-crafters/codecrafters-shell-rust/.devenv.flake.nix
-/home/mohammed/work/learning/code-crafters/codecrafters-shell-rust/.env
-/home/mohammed/work/learning/code-crafters/codecrafters-shell-rust/devenv.local.nix
-/home/mohammed/work/learning/code-crafters/codecrafters-shell-rust/devenv.lock
-/home/mohammed/work/learning/code-crafters/codecrafters-shell-rust/devenv.nix
-/home/mohammed/work/learning/code-crafters/codecrafters-shell-rust/devenv.yaml

@@ -7,7 +7,12 @@ fn main() {
         print!("$ ");
         io::stdout().flush().unwrap();
         io::stdin().read_line(&mut cmd).unwrap();
-        println!("{}: command not found", cmd.trim());
-        io::stdout().flush().unwrap();
+        cmd = cmd.trim().into();
+        if cmd == "exit" {
+            break;
+        } else {
+            println!("{}: command not found", cmd);
+            io::stdout().flush().unwrap();
+        }
     }
 }

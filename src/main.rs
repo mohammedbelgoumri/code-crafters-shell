@@ -11,7 +11,7 @@ fn parse(input: &str) -> Option<Command> {
         Some(Command::Exit)
     } else {
         input
-            .strip_prefix("echo")
+            .strip_prefix("echo ")
             .map(|message| Command::Echo(message.into()))
     }
 }

@@ -1,5 +1,8 @@
-#set page(width: 800pt, height: auto, margin: 20pt)
-#set text(font: "Liberation Sans", size: 20pt, fill: rgb("1f2328"))
+#let theme = sys.inputs.at("theme", default: "light")
+#let text-color = if theme == "dark" { rgb("f0f6fc") } else { rgb("1f2328") }
+
+#set page(width: 800pt, height: auto, margin: 20pt, fill: none)
+#set text(fill: text-color, size: 18pt)
 #set heading(
   numbering: (..args) => {
     let nums = args.pos()
@@ -10,50 +13,81 @@
 )
 // #set page(numbering: "1")
 
-= CodeCrafters build your own shell
+= CodeCrafters build your own shell — implementation plan
+
+Reordered into build order (core → parsing → execution features →
+interactive polish) rather than course order, and corrected against
+POSIX/real-shell behavior where the original draft was wrong or
+ambiguous. Lines marked *Verify* are plausible but not independently
+confirmed against the actual test cases — check them against your
+own test run before trusting the wording here.
 
 #line(length: 100%)
 
-== Stages
+== Build order
 
-=== Print a prompt
-=== Invalid commands
++ Core REPL & command dispatch
++ Navigation (`pwd`, `cd`)
++ Tokenizer: quoting
++ Parser: redirection
++ Parser: pipelines
++ Expansion: parameter expansion (`declare`, `$VAR`)
++ Process management: background jobs
++ Interactive: history
++ Interactive: command & file completion
++ Interactive: programmable completion
+
+Each section below is tagged with which layer of the tokenizer /
+parser / expansion / executor split it belongs to, so you can see at a
+glance what's blocked on what.
+
+#line(length: 100%)
+
+== Core REPL & command dispatch
+
+*Layer: executor (no tokenizer/parser dependency yet — a bare
+whitespace split is enough until the Quoting section).*
+
+=== Prompt and REPL loop
 
 + Display a prompt `$ `.
-+ Read user input.
-+ Print error messages `{command}: command not found`.
-
-=== Implement a REPL
-
-+ Display a prompt `$ `, then read a line of input.
-+ Print error messages `{command}: command not found`.
++ Read a line of input.
++ If the command isn't a builtin and isn't found on `PATH`, print
+  `{command}: command not found`.
 + Repeat.
-
 
 === The `exit` builtin
 
-Terminates the shell.
+- Form: `exit {code}`.
+- Exits the shell with the given integer exit code.
+- `0` indicates success; any other value indicates an error.
+- #strong[Correction from the original draft:] this takes an exit-code
+  argument — "terminates the shell" alone is incomplete.
 
 === The `echo` builtin
 
-- Form: `echo {args...}`
-- Print inputs to stdout, separated by spaces, and followed by a newline.
+- Form: `echo {args...}`.
+- Print inputs to stdout, separated by spaces, followed by a newline.
 
 === The `type` builtin
 
 + If the argument is a builtin, print `{command} is a shell builtin`.
-+ Else, look for it in the `PATH` environment variable.
-  + If found and executable, print `{command} is a <full path>` for the first match.
++ Else, search `PATH`:
+  + If found and executable, print `{command} is a <full path>` for
+    the first match.
   + Else, print `{command}: not found`.
 
 === Run external programs
 
 + Read an input of the form `{program} {args...}`.
-+ If `program` is an executable from the `PATH`, run it, forwarding all arguments.
++ If `program` resolves to an executable via `PATH`, run it,
+  forwarding all arguments.
 
 #line(length: 100%)
 
 == Navigation
+
+*Layer: executor.*
 
 === The `pwd` builtin
 
@@ -61,135 +95,236 @@ Print the full absolute path to the current working directory.
 
 === The `cd` builtin
 
-Takes the form: `cd {path}`:
-+ If `path` is the symbol `~`, change to the user's home directory (from the `HOME` environment variable).
-+ If `path` is an absolute or relative path, change to it, if it exists.
+Form: `cd {path}`.
+
++ If `path` is `~`, change to the user's home directory (from the
+  `HOME` environment variable).
++ Else if `path` is an absolute or relative path that exists, change
+  to it.
 + Else, print `cd {path}: no such file or directory`.
 
 #line(length: 100%)
 
+== Tokenizer: quoting
 
-== Quoting
+*Layer: tokenizer. This is the character-level, quoting-aware scan
+that every later stage (redirection, pipelines, parameter expansion)
+depends on — get this right before building anything on top of it.*
 
 === Single quotes
 
-- Everything withing single quotes is literal
-  (spaces are not collapsed, escapes are not handled, and special characters are treated as literals).
-  In particular, backslashes are read literally.
-- Two single-quoted strings juxtaposed without whitespace are concatenated.
-- An empty single-quoted string is ignored.
+- Everything within `'...'` is literal: spaces aren't collapsed,
+  backslash isn't special, no character is treated as an operator or
+  expansion trigger.
+- Adjacent quoted/unquoted fragments with no separating whitespace
+  glue into a single token — `'foo'bar"baz"` is one word, not three.
+  #strong[Correction:] this rule isn't specific to two single-quoted
+  strings; it applies to any adjacent combination of quoted and
+  unquoted spans.
+- An empty quoted span (`''`) contributes nothing when glued to
+  adjacent fragments (`a''b` → `ab`). #strong[Correction:] this does
+  *not* mean a standalone `''` disappears as an argument — `echo ''`
+  still passes one empty-string argument to `echo`. Only glued-empty
+  spans vanish; a whole empty word does not.
 
 === Double quotes
 
-- A backslash followed by `$, \, "` or `` \` `` forms an escape sequence.
-- A `$` triggers expansion.
-- Everything else is identical to single quotes.
+- A backslash is only special when immediately followed by `$`,
+  `` ` ``, `"`, `\`, or a newline — in those cases it escapes the
+  following character. #strong[Correction:] a backslash before a
+  single quote (`\'`) is *not* an escape sequence inside double
+  quotes; `\'` is a literal backslash followed by a literal `'`. This
+  matches both POSIX and real shell test behavior — don't include `'`
+  in the escaped-character set.
+- `$` triggers expansion (see Parameter expansion, below).
+- Everything else behaves like single quotes: literal, no operator
+  meaning.
 
-=== Unquoted Backslash
+=== Unquoted backslash
 
-- Any character following a backslash is read literally.
-
+- Any character following an unquoted backslash is read literally
+  (the backslash itself is consumed, not kept).
 
 === Executing quoted executables
 
-- Executable names can be quoted with single or double quotes.
+- The command name may itself be single- or double-quoted;
+  quote-removal applies to it the same as to any other word before
+  it's used as a program name.
 
 #line(length: 100%)
 
-== Redirection
+== Parser: redirection
 
-- `{command} > {file}` or `{command} 1> {file}`: redirect stdout to a file.
-- `{command} 2> {file}`: redirect stderr to a file.
-- `{command} >> {file}` or `{command} 1>> {file}`: append stdout to a file.
+*Layer: parser (`io_redirect`/`io_file` productions). Only the
+output-side subset below is required — no `<`, `<<`, `<<-`, `<&`,
+`>&`, `<>`, or `>|` needed for this course.*
+
+- `{command} > {file}` or `{command} 1> {file}`: redirect stdout to a
+  file (truncate).
+- `{command} 2> {file}`: redirect stderr to a file (truncate).
+- `{command} >> {file}` or `{command} 1>> {file}`: append stdout to a
+  file.
 - `{command} 2>> {file}`: append stderr to a file.
 
 #line(length: 100%)
 
+== Parser: pipelines
 
-== Command completion
-
-- Hitting tab after a partial command triggers command completion.
-- The candidates for completion are builtins and members of the `PATH` environment variable.
-- If multiple candidates match the same prefix:
-  - Print the maximal common prefix if it's not empty.
-  - Else, print the list of candidates after each subsequent hit of tab, and reprint the partial command.
-- If there are no candidates, ring the bell (0x07).
-
-#line(length: 100%)
-
-== File completion
-
-- Hitting tab after a partial (potentially empty) argument triggers file completion.
-- The prefix is the text after the last space.
-- The candidates are files in the current directory (or the path specified).
-- If a single candidate matches the prefix, print it, followed by a slash if it's a directory and a space otherwise.
-- If multiple candidates match the prefix:
-  - Ring the bell (0x07).
-  - At each subsequent hit of tab, print the list of candidates.
-  - Reprint the partial command.
-- If there are no candidates, ring the bell.
-
-#line(length: 100%)
-
-== Pipelines
+*Layer: parser (`pipe_sequence`), plus executor work to wire real
+pipes and handle builtins mid-pipeline.*
 
 - A pipeline is a sequence of commands separated by `|`.
-- The output of each command is the input of the next.
-- The output of the last command is the return value of the pipeline.
+- Each command's stdout feeds the next command's stdin.
+- The pipeline's exit status is the exit status of its last command.
+  #strong[Correction:] the original draft's "the output of the last
+  command is the return value of the pipeline" conflates *stdout
+  content* (already covered by the previous point) with *exit status*
+  (a separate, and separately testable, thing) — keep these two
+  distinct in your implementation.
+- A builtin inside a pipeline still needs its stdin/stdout wired to
+  the pipe — for a builtin this means redirecting the shell process's
+  own file descriptors around the call and restoring them after,
+  rather than forking.
 
 #line(length: 100%)
 
-== History
+== Expansion: parameter expansion
 
-- `history` is a builtin.
-- `history {count}`: print a numbered list of the last {count} commands
-  (including invalid commands, but ignoring empty lines; default: full).
-- The up and down arrow keys can be used to navigate the history.
-- Hitting enter on a history line executes it.
-- `history -r <file>` reads the history from a file.
-- `history -w <file>` writes the history to a file.
-- `history -a <file>` appends the history to a file.
-- The previous 3 commands include themself in the history.
-- At startup, the history is read from `$HISTFILE`.
-- At exit, the history is appended to `$HISTFILE`, if set.
-- The history file is created if it doesn't exist.
+*Layer: expansion pass (runs on parsed `WORD` nodes, after tokenizing
+and parsing, right before execution — see the tokenizer+parser+
+expansion spec for how this pass fits in).*
+
+=== The `declare` builtin
+
+- Form: `declare {name}={value}` or `declare -p {name}`.
+- `declare {name}={value}`: if `{name}` is a valid identifier
+  (name-shaped), set the shell variable `{name}` to `{value}`.
+- `declare -p {name}`: print `{name}`'s value if it's set.
+  #strong[Verify:] confirm the exact expected output format for both
+  the set and unset cases — the original draft doesn't specify one,
+  and there's a dedicated test stage specifically for the *missing*-
+  variable case (`declare -p` on an unset name), which needs its own
+  explicit behavior, not just "if it exists."
+
+=== Expansion rules
+
+- Outside single quotes, `$name` and `${name}` expand to the current
+  value of `name`.
+- An unset variable expands to an empty string.
+  #strong[Verify:] the original draft additionally says the resulting
+  empty word is "dropped" (i.e. `echo $UNSET` produces *zero*
+  arguments, not one empty-string argument) — this is correct real-
+  shell behavior via field splitting, but it's a narrow special case
+  worth confirming against an actual test run rather than assuming;
+  if the checker instead expects the word to survive as an empty
+  argument, you don't need general field splitting to get this case
+  right either way, just this one specific rule.
 
 #line(length: 100%)
 
-== Background jobs
+== Process management: background jobs
 
-+ When the last token of a command is `&`, the command is run in the background,
-  the number of the job and pid is printed.
-+ Background jobs `stdout` and `stderr` are printed to the terminal.
-+ `jobs` is a builtin that prints information about jobs:
-  + Each job is printed on a new line.
-  + The format is: `[<job number>]<marker>  <status> <command>`.
-  + `marker` is `+` for the last job, `-` for the penultimate job, and a space for all other jobs.
-  + `status` is `Running` if the job is running.
-  + When the job exits, `status` is `Done`, and the job must be reaped.
-  + Numbers of reaped jobs are free to be reused for new jobs.
+*Layer: executor. Parser-side, this only needs the trailing `&`
+handled as an async marker on `separator_op`; everything else here is
+process-table bookkeeping.*
+
+=== Starting and observing background jobs
+
++ When the last token of a command is `&`, run it in the background
+  and print its job number and PID.
++ A background job's stdout and stderr print directly to the
+  terminal.
+
+=== The `jobs` builtin
+
++ Prints one line per job, format: `[{job number}]{marker}  {status} {command}`.
++ `{marker}` is `+` for the most-recently-started job, `-` for the
+  second-most-recent, and a space for all others.
++ `{status}` is `Running` while the job is active.
++ When a job exits, `{status}` becomes `Done` and the job must be
+  reaped (before the next prompt is shown).
++ A reaped job's number is free to be reused by a later job.
 
 #line(length: 100%)
 
-== Programmable completion
-- The `complete` builtin can be used to implement programmable completion.
-- `complete -C <path> <command>`: means `<command>` can be completed by the program `<path>`.
-- `path` must contain a file that prints the completion to stdout.
-- `complete -p <command>`:
-  - If `command` has a completion function, print `complete -C <path> <command>`.
-  - Else, print `complete: <command>: no completion specification`.
-- `complete -r <command>`: remove the completion for `<command>`.
-- The completer uses `COMP_LINE` and `COMP_POINT` environment variables to determine the current command line and cursor position.
-- The case where 0 or multiple completions are provided are handled analogously to progarm and file completion.
+== Interactive: history
 
-== Parameter expansion
+*Layer: interactive/readline — outside POSIX's shell grammar
+entirely; no tokenizer/parser work involved.*
 
-- `declare` is a builtin.
-- Form: `declare <name>=<value>` or, `declare -p <name>`.
-- `declare <name>=<value>`: if `<name>` is a valid identifier, set `<name>` to `<value>`.
-- `declare -p <name>`: print the value of `<name>` if it exists.
-- Outside of quotes, `$<name>` expands to the value of `<name>`, same for `${name}`.
-- Undefined variables expand to an empty string, and are dropped.
+=== The `history` builtin
 
+- `history {count}`: print a numbered list of the last `{count}`
+  commands (default: all). Includes invalid commands; ignores empty
+  lines.
+- `history -r {file}`: read history from a file.
+- `history -w {file}`: write history to a file (overwrite).
+- `history -a {file}`: append new history entries to a file.
+- #strong[Verify:] the original draft's note that "the previous 3
+  commands include themself in the history" is unclear as written —
+  confirm what's actually being asserted (most likely: that running
+  `history -r`/`-w`/`-a` itself gets recorded as a history entry, same
+  as any other command) before relying on it.
 
+=== Interactive recall
 
+- Up/down arrow keys navigate through history.
+- Pressing enter on a recalled line executes it.
+
+=== Persistence
+
+- At startup, history is read from `$HISTFILE` if set.
+- At exit, history is appended to `$HISTFILE` if set.
+- `$HISTFILE` is created if it doesn't already exist.
+
+#line(length: 100%)
+
+== Interactive: command & file completion
+
+*Layer: interactive/readline — no POSIX grounding, entirely
+terminal/raw-mode + filesystem work.*
+
+=== Command completion
+
+- Tab after a partial command triggers completion.
+- Candidates: shell builtins and executables found on `PATH`.
+- One or more candidates share a longer common prefix than what's
+  typed → complete to that prefix.
+- Multiple candidates, no further common prefix → on each subsequent
+  tab, print the full candidate list and reprint the partial command.
+- No candidates → ring the bell (`0x07`).
+
+=== File completion
+
+- Tab after a partial (possibly empty) argument triggers file
+  completion.
+- The completion prefix is the text after the last space.
+- Candidates: filesystem entries in the relevant directory.
+- Exactly one candidate → print it, with a trailing `/` if it's a
+  directory, or a trailing space otherwise.
+- Multiple candidates → ring the bell on first tab; on subsequent
+  tabs, print the candidate list and reprint the partial command.
+- No candidates → ring the bell.
+
+#line(length: 100%)
+
+== Interactive: programmable completion
+
+*Layer: interactive/readline, plus a subprocess-invocation executor
+piece (the `-C` completer program).*
+
+- The `complete` builtin registers custom completion behavior.
+- `complete -C {path} {command}`: registers `{path}` as the completer
+  program for `{command}`.
+- The completer program prints its completion candidates to stdout.
+- `complete -p {command}`:
+  - If `{command}` has a registered completer, print
+    `complete -C {path} {command}`.
+  - Else, print `complete: {command}: no completion specification`.
+- `complete -r {command}`: unregister `{command}`'s completer.
+- The completer process reads `COMP_LINE` and `COMP_POINT` from its
+  environment to determine the current command line and cursor
+  position.
+- Zero or multiple candidates from a `-C` completer are handled the
+  same way as command/file completion above (bell on none; common-
+  prefix-then-list on multiple).
